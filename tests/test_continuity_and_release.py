@@ -659,3 +659,236 @@ def test_missing_graph_projection_triggers_authoritative_fhir_fallback():
     assert result.continuity_source == ContinuitySource.FHIR_R4_AUTHORITATIVE
     assert result.fallback_reason == "MISSING_GRAPH_PROJECTION"
     assert any(enc.encounter_id == ENCOUNTER_JAN31_ID for enc in result.encounters)
+
+
+def test_insurer_packet_fails_closed_on_empty_or_disjoint_allowed_categories():
+    fhir_store = InMemoryFhirR4Store()
+    _seed_jan31_neurology_fhir(fhir_store)
+    grant_service = GrantService()
+    release_service = InsurerReleaseService(fhir_store=fhir_store, grant_service=grant_service)
+
+    # Empty allowed_categories on consent & grant must yield zero items (fail closed).
+    empty_consent = ConsentRecord(
+        consent_version_id="CV-EMPTY",
+        tenant_id=TENANT_A,
+        patient_id=PATIENT_ID,
+        status=ConsentStatus.ACTIVE,
+        allowed_categories=frozenset(),
+    )
+    empty_grant = grant_service.create_grant(
+        tenant_id=TENANT_A,
+        patient_id=PATIENT_ID,
+        insurer_id="INS-SYN-01",
+        purpose="prior_auth_documentation",
+        consent_record=empty_consent,
+        now=_now(),
+    )
+    packet_empty = release_service.assemble_allowlisted_packet(
+        grant=empty_grant,
+        consent=empty_consent,
+        checklist_requirements=["Neurology SOAP Note"],
+        now=_now() + timedelta(hours=1),
+    )
+    assert packet_empty.allowlisted_items == []
+    assert packet_empty.coverage_checklist == CoverageChecklist(
+        numerator=0, denominator=1, missing_items=["Neurology SOAP Note"]
+    )
+
+    # Disjoint grant vs consent categories must also fail closed.
+    consent = _active_consent()
+    disjoint_grant = grant_service.create_grant(
+        tenant_id=TENANT_A,
+        patient_id=PATIENT_ID,
+        insurer_id="INS-SYN-01",
+        purpose="prior_auth_documentation",
+        consent_record=consent,
+        allowed_categories=frozenset({"medications"}),
+        now=_now(),
+    )
+    narrowed_consent = consent.model_copy(update={"allowed_categories": frozenset({"conditions"})})
+    packet_disjoint = release_service.assemble_allowlisted_packet(
+        grant=disjoint_grant,
+        consent=narrowed_consent,
+        checklist_requirements=["Gabapentin medication"],
+        now=_now() + timedelta(hours=1),
+    )
+    assert packet_disjoint.allowlisted_items == []
+    assert packet_disjoint.coverage_checklist.numerator == 0
+
+
+def test_insurer_packet_enforces_document_reference_and_condition_status_rules():
+    fhir_store = InMemoryFhirR4Store()
+    _seed_jan31_neurology_fhir(fhir_store)
+
+    # Valid current DocumentReference attached to signed encounter -> included
+    fhir_store.create(
+        TENANT_A,
+        {
+            "resourceType": "DocumentReference",
+            "id": "DOC-CURRENT-SIGNED",
+            "status": "current",
+            "docStatus": "final",
+            "description": "MRI lumbar spine report signed",
+            "subject": {"reference": f"Patient/{PATIENT_ID}"},
+            "context": {"encounter": [{"reference": f"Encounter/{ENCOUNTER_JAN31_ID}"}]},
+        },
+    )
+    # Preliminary docStatus DocumentReference -> excluded
+    fhir_store.create(
+        TENANT_A,
+        {
+            "resourceType": "DocumentReference",
+            "id": "DOC-PRELIMINARY",
+            "status": "current",
+            "docStatus": "preliminary",
+            "description": "Preliminary radiology draft",
+            "subject": {"reference": f"Patient/{PATIENT_ID}"},
+            "context": {"encounter": [{"reference": f"Encounter/{ENCOUNTER_JAN31_ID}"}]},
+        },
+    )
+    # Superseded DocumentReference -> excluded
+    fhir_store.create(
+        TENANT_A,
+        {
+            "resourceType": "DocumentReference",
+            "id": "DOC-SUPERSEDED",
+            "status": "superseded",
+            "docStatus": "final",
+            "description": "Superseded imaging report",
+            "subject": {"reference": f"Patient/{PATIENT_ID}"},
+            "context": {"encounter": [{"reference": f"Encounter/{ENCOUNTER_JAN31_ID}"}]},
+        },
+    )
+    # Unattached DocumentReference (not linked to signed encounter) -> excluded
+    fhir_store.create(
+        TENANT_A,
+        {
+            "resourceType": "DocumentReference",
+            "id": "DOC-UNATTACHED",
+            "status": "current",
+            "docStatus": "final",
+            "description": "Unattached external scan",
+            "subject": {"reference": f"Patient/{PATIENT_ID}"},
+        },
+    )
+    # Condition with verificationStatus=entered-in-error -> excluded
+    fhir_store.create(
+        TENANT_A,
+        {
+            "resourceType": "Condition",
+            "id": "COND-ERROR-01",
+            "verificationStatus": {
+                "coding": [
+                    {
+                        "system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+                        "code": "entered-in-error",
+                    }
+                ]
+            },
+            "code": {"text": "Erroneous diagnosis"},
+            "subject": {"reference": f"Patient/{PATIENT_ID}"},
+            "encounter": {"reference": f"Encounter/{ENCOUNTER_JAN31_ID}"},
+        },
+    )
+
+    consent = _active_consent()
+    grant_service = GrantService()
+    grant = grant_service.create_grant(
+        tenant_id=TENANT_A,
+        patient_id=PATIENT_ID,
+        insurer_id="INS-SYN-01",
+        purpose="prior_auth_documentation",
+        consent_record=consent,
+        now=_now(),
+    )
+    release_service = InsurerReleaseService(fhir_store=fhir_store, grant_service=grant_service)
+    packet = release_service.assemble_allowlisted_packet(
+        grant=grant,
+        consent=consent,
+        checklist_requirements=["MRI lumbar spine report"],
+        now=_now() + timedelta(hours=1),
+    )
+
+    item_ids = {item.resource_id for item in packet.allowlisted_items}
+    assert "DOC-CURRENT-SIGNED" in item_ids
+    assert "DOC-PRELIMINARY" not in item_ids
+    assert "DOC-SUPERSEDED" not in item_ids
+    assert "DOC-UNATTACHED" not in item_ids
+    assert "COND-ERROR-01" not in item_ids
+    assert packet.coverage_checklist == CoverageChecklist(numerator=1, denominator=1, missing_items=[])
+
+
+def test_continuity_service_enforces_scope_token_allowed_categories_and_brief_excludes_current_refs():
+    fhir_store = InMemoryFhirR4Store()
+    _seed_jan31_neurology_fhir(fhir_store)
+    graph_store = InMemorySpannerGraphStore()
+    graph_store.rebuild_from_fhir(TENANT_A, fhir_store)
+
+    authz = _make_authz_service()
+    actor = ActorContext(
+        actor_id="CLIN-ORTHO-01",
+        tenant_id=TENANT_A,
+        role="CLINICIAN",
+        specialty="Orthopedics",
+        care_patient_ids=frozenset({PATIENT_ID}),
+    )
+    consent = _active_consent()
+
+    # 1. Narrow token allowing ONLY medications excludes clinical_note and problem items/refs
+    meds_only_token = authz.authorize_clinical_access(
+        actor=actor,
+        patient_id=PATIENT_ID,
+        patient_tenant_id=TENANT_A,
+        consent_record=consent,
+        requested_categories=frozenset({"medications"}),
+        now=_now(),
+    )
+    service = ContinuityService(fhir_store=fhir_store, graph_store=graph_store, authz_service=authz)
+    meds_result = service.get_verified_patient_history(
+        scope_token=meds_only_token,
+        as_of_date=date(2026, 2, 20),
+        max_encounters=10,
+        now=_now(),
+    )
+    assert [item.category for item in meds_result.prior_history_items] == ["medication"]
+    ref_types = {ref.resource_type for ref in meds_result.fhir_version_refs}
+    assert "Composition" not in ref_types
+    assert "Condition" not in ref_types
+    assert "MedicationStatement" in ref_types
+
+    # 2. Empty allowed_categories fails closed with zero items and zero refs
+    empty_token = authz.authorize_clinical_access(
+        actor=actor,
+        patient_id=PATIENT_ID,
+        patient_tenant_id=TENANT_A,
+        consent_record=consent,
+        requested_categories=frozenset(),
+        now=_now(),
+    )
+    empty_result = service.get_verified_patient_history(
+        scope_token=empty_token,
+        as_of_date=date(2026, 2, 20),
+        max_encounters=10,
+        now=_now(),
+    )
+    assert empty_result.encounters == []
+    assert empty_result.prior_history_items == []
+    assert empty_result.fhir_version_refs == []
+
+    # 3. to_continuity_brief excludes current_encounter's refs from fhir_version_refs
+    full_token = _make_scope_token(authz)
+    full_result = service.get_verified_patient_history(
+        scope_token=full_token,
+        as_of_date=date(2026, 2, 20),
+        max_encounters=10,
+        now=_now(),
+    )
+    brief = full_result.to_continuity_brief(
+        CurrentEncounterContext(
+            encounter_id=ENCOUNTER_JAN31_ID,
+            encounter_date=date(2026, 1, 31),
+            specialty="Neurology",
+        )
+    )
+    assert brief.prior_history_items == []
+    assert brief.fhir_version_refs == []

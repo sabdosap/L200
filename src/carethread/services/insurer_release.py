@@ -112,6 +112,34 @@ def _parse_date(raw: str | None) -> date | None:
     return None
 
 
+def _extract_document_reference_encounter_id(resource: dict[str, Any]) -> str | None:
+    direct = _extract_ref_id((resource.get("encounter") or {}).get("reference"), "Encounter")
+    if direct:
+        return direct
+    context = resource.get("context") or {}
+    if isinstance(context, dict):
+        enc_list = context.get("encounter") or []
+        if isinstance(enc_list, list):
+            for entry in enc_list:
+                if isinstance(entry, dict):
+                    candidate = _extract_ref_id(entry.get("reference"), "Encounter")
+                    if candidate:
+                        return candidate
+    return None
+
+
+def _is_condition_entered_in_error(resource: dict[str, Any]) -> bool:
+    ver_status = resource.get("verificationStatus") or {}
+    if not isinstance(ver_status, dict):
+        return False
+    if str(ver_status.get("text") or "").strip().lower() == "entered-in-error":
+        return True
+    for coding in ver_status.get("coding") or []:
+        if isinstance(coding, dict) and str(coding.get("code") or "").strip().lower() == "entered-in-error":
+            return True
+    return False
+
+
 def _contains_forbidden_marker(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _FORBIDDEN_CONTENT_MARKERS)
@@ -230,13 +258,23 @@ class InsurerReleaseService:
                 continue
             if rtype in _REQUIRE_FINAL_STATUS_TYPES and status != "final":
                 continue
+            if rtype == "DocumentReference":
+                doc_status = str(res.get("docStatus") or "").lower()
+                if status != "current" or doc_status in _FORBIDDEN_STATUSES:
+                    continue
+            if rtype == "Condition" and _is_condition_entered_in_error(res):
+                continue
 
             category = _RESOURCE_TYPE_TO_CATEGORY[rtype]
-            if effective_categories and category not in effective_categories:
+            if category not in effective_categories:
                 continue
 
             # Verify patient ownership (directly via subject, via encounter, or via Provenance target)
-            enc_id = _extract_ref_id((res.get("encounter") or {}).get("reference"), "Encounter")
+            enc_id = (
+                _extract_document_reference_encounter_id(res)
+                if rtype == "DocumentReference"
+                else _extract_ref_id((res.get("encounter") or {}).get("reference"), "Encounter")
+            )
             subject_pid = _extract_ref_id((res.get("subject") or {}).get("reference"), "Patient")
 
             if rtype == "Provenance":
@@ -257,8 +295,8 @@ class InsurerReleaseService:
                 )
                 if not belongs_to_patient:
                     continue
-                # Non-final-status types (Condition, Medication*) must belong to a signed encounter
-                if rtype in ("Condition", "MedicationRequest", "MedicationStatement"):
+                # Signed-encounter-bound types must belong to a signed (status="final") encounter
+                if rtype in ("Condition", "MedicationRequest", "MedicationStatement", "DocumentReference"):
                     if enc_id is None or enc_id not in signed_encounter_ids:
                         continue
                 enc_info = patient_encounters.get(enc_id or "")
