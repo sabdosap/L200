@@ -52,11 +52,11 @@ resource "google_service_account" "carethread" {
 
 locals {
   project_roles = {
-    api_datastore    = { sa = "api", role = "roles/datastore.user" }
-    api_tasks        = { sa = "api", role = "roles/cloudtasks.enqueuer" }
-    api_dlp          = { sa = "api", role = "roles/dlp.user" }
-    api_logging      = { sa = "api", role = "roles/logging.logWriter" }
-    api_trace        = { sa = "api", role = "roles/cloudtrace.agent" }
+    api_datastore = { sa = "api", role = "roles/datastore.user" }
+    api_tasks     = { sa = "api", role = "roles/cloudtasks.enqueuer" }
+    api_dlp       = { sa = "api", role = "roles/dlp.user" }
+    api_logging   = { sa = "api", role = "roles/logging.logWriter" }
+    api_trace     = { sa = "api", role = "roles/cloudtrace.agent" }
 
     # sa-adk-runtime: Vertex AI inference, FHIR read-only fallback, Spanner read-only,
     # filtered Firestore sessions, SDP redaction, and telemetry.

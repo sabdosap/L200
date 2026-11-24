@@ -6,10 +6,19 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.0"
     }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 6.0"
+    }
   }
 }
 
 provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+provider "google-beta" {
   project = var.project_id
   region  = var.region
 }
@@ -50,7 +59,11 @@ module "iam" {
 }
 
 module "security_obs" {
-  source              = "./modules/security_obs"
+  source = "./modules/security_obs"
+  providers = {
+    google      = google
+    google-beta = google-beta
+  }
   project_id          = var.project_id
   region              = var.region
   environment         = var.environment
@@ -110,29 +123,29 @@ module "firestore" {
 }
 
 module "tasks_and_run" {
-  source                   = "./modules/tasks_and_run"
-  project_id               = var.project_id
-  region                   = var.region
-  environment              = var.environment
-  service_accounts         = module.iam.service_account_emails
-  raw_audio_bucket_name    = module.storage.raw_audio_bucket_name
-  transcripts_bucket_name  = module.storage.transcripts_bucket_name
-  packets_bucket_name      = module.storage.packets_bucket_name
-  fhir_store_id            = module.healthcare_fhir.fhir_store_id
-  spanner_instance_name    = module.spanner_graph.spanner_instance_name
-  spanner_database_name    = module.spanner_graph.spanner_database_name
-  firestore_database_name  = module.firestore.database_name
-  sdp_deidentify_template  = module.security_obs.sdp_deidentify_template_name
-  signing_secret_id        = module.security_obs.signing_secret_id
-  capability_secret_id     = module.security_obs.capability_secret_id
-  enable_argon_reviewer    = var.enable_argon_reviewer
-  api_image                = var.api_image
-  adk_runtime_image        = var.adk_runtime_image
-  worker_transcribe_image  = var.worker_transcribe_image
-  worker_fhir_image        = var.worker_fhir_image
-  worker_graph_image       = var.worker_graph_image
-  worker_release_image     = var.worker_release_image
-  labels                   = var.labels
+  source                  = "./modules/tasks_and_run"
+  project_id              = var.project_id
+  region                  = var.region
+  environment             = var.environment
+  service_accounts        = module.iam.service_account_emails
+  raw_audio_bucket_name   = module.storage.raw_audio_bucket_name
+  transcripts_bucket_name = module.storage.transcripts_bucket_name
+  packets_bucket_name     = module.storage.packets_bucket_name
+  fhir_store_id           = module.healthcare_fhir.fhir_store_id
+  spanner_instance_name   = module.spanner_graph.spanner_instance_name
+  spanner_database_name   = module.spanner_graph.spanner_database_name
+  firestore_database_name = module.firestore.database_name
+  sdp_deidentify_template = module.security_obs.sdp_deidentify_template_name
+  signing_secret_id       = module.security_obs.signing_secret_id
+  capability_secret_id    = module.security_obs.capability_secret_id
+  enable_argon_reviewer   = var.enable_argon_reviewer
+  api_image               = var.api_image
+  adk_runtime_image       = var.adk_runtime_image
+  worker_transcribe_image = var.worker_transcribe_image
+  worker_fhir_image       = var.worker_fhir_image
+  worker_graph_image      = var.worker_graph_image
+  worker_release_image    = var.worker_release_image
+  labels                  = var.labels
 
   depends_on = [
     module.storage,

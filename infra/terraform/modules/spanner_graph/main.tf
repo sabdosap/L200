@@ -45,13 +45,13 @@ resource "google_spanner_instance" "continuity" {
 }
 
 resource "google_spanner_database" "continuity" {
-  instance                 = google_spanner_instance.continuity.name
-  name                     = "carethread-continuity"
-  project                  = var.project_id
-  database_dialect         = "GOOGLE_STANDARD_SQL"
-  deletion_protection      = true
-  enable_drop_protection   = true
-  ddl                      = local.ddl_statements
+  instance               = google_spanner_instance.continuity.name
+  name                   = "carethread-continuity"
+  project                = var.project_id
+  database_dialect       = "GOOGLE_STANDARD_SQL"
+  deletion_protection    = true
+  enable_drop_protection = true
+  ddl                    = local.ddl_statements
 
   encryption_config {
     kms_key_name = var.kms_key_name

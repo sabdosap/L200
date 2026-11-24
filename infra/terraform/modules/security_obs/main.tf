@@ -1,3 +1,16 @@
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 6.0"
+    }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 6.0"
+    }
+  }
+}
+
 variable "project_id" {
   type = string
 }
@@ -45,8 +58,9 @@ data "google_storage_project_service_account" "gcs_agent" {
 }
 
 resource "google_project_service_identity" "spanner_agent" {
-  project = var.project_id
-  service = "spanner.googleapis.com"
+  provider = google-beta
+  project  = var.project_id
+  service  = "spanner.googleapis.com"
 }
 
 resource "google_kms_crypto_key_iam_member" "gcs_cmek" {

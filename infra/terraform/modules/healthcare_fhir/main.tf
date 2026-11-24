@@ -25,13 +25,13 @@ resource "google_healthcare_dataset" "carethread" {
   time_zone = "UTC"
 }
 
+# Resource versioning is enabled via disable_resource_versioning = false (enableResourceVersioning = true in Cloud Healthcare API).
 resource "google_healthcare_fhir_store" "authoritative_r4" {
   name                                = "carethread-fhir-r4-${var.environment}"
   dataset                             = google_healthcare_dataset.carethread.id
   version                             = "R4"
   enable_update_create                = false
   disable_referential_integrity       = false
-  # Resource versioning enabled (enableResourceVersioning = true in Cloud Healthcare API)
   disable_resource_versioning         = false
   complex_data_type_reference_parsing = "ENABLED"
   labels                              = var.labels

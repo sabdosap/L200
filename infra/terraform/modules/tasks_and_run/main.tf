@@ -92,10 +92,10 @@ variable "labels" {
 
 locals {
   queues = {
-    transcribe_and_draft      = "carethread-transcribe-and-draft-${var.environment}"
-    commit_fhir_record        = "carethread-commit-fhir-record-${var.environment}"
-    refresh_continuity_graph  = "carethread-refresh-continuity-graph-${var.environment}"
-    assemble_insurer_packet   = "carethread-assemble-insurer-packet-${var.environment}"
+    transcribe_and_draft     = "carethread-transcribe-and-draft-${var.environment}"
+    commit_fhir_record       = "carethread-commit-fhir-record-${var.environment}"
+    refresh_continuity_graph = "carethread-refresh-continuity-graph-${var.environment}"
+    assemble_insurer_packet  = "carethread-assemble-insurer-packet-${var.environment}"
   }
 }
 
