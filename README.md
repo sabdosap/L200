@@ -77,6 +77,133 @@ CareThread follows a clean hexagonal architecture separating deterministic secur
 
 ---
 
+## 📋 Agent Input & Output Schemas (`v1.0.0`)
+
+All CareThread agent contracts are strict Pydantic v2 models (`ConfigDict(extra="forbid")`, `schema_version = "1.0.0"`), orchestrated by `CareThreadCoordinator` (`src/carethread/agents/coordinator.py`).
+
+### 1. Visit Draft Pipeline (`VisitDraftSequentialPipeline` / `run_visit_draft_pipeline`)
+**Sub-agents:** `soap_extractor_agent` -> `evidence_verifier_agent` -> optional `conflict_reviewer_agent` (`gemini-4-argon`, max 1 escalation)
+
+*   **Inputs:** `tenant_id`, `encounter_id`, `transcript_object_path` (private CMEK GCS path — never logged or stored in session), `session_id`, `user_id`, `soap_extractor`, optional `transcript_version_id`, `conflict_reviewer`, `trigger_conflict_review` (`False`), `max_regenerations` (`2`), `max_argon_escalations` (`1`), `known_fhir_refs`, `ttl_seconds` (`900`).
+*   **Output (`VisitDraftPipelineResult`):**
+```json
+{
+  "schema_version": "1.0.0",
+  "job_id": "string",
+  "session_id": "string",
+  "status": "AWAITING_CLINICIAN_REVIEW | FAILED_TERMINAL",
+  "draft": {
+    "schema_version": "1.0.0",
+    "draft_id": "DRF-2026-0131-0001",
+    "draft_version": 1,
+    "status": "DRAFT_AWAITING_CLINICIAN_REVIEW",
+    "encounter_ref": { "encounter_id": "ENC-2026-0131-NEURO", "encounter_date": "2026-01-31", "specialty": "Neurology" },
+    "source_refs": { "transcript_version_id": "TR-2026-0131-v1", "fhir_prior_refs": [] },
+    "speaker_attribution": { "status": "UNVERIFIED_REQUIRES_CLINICIAN_CONFIRMATION", "candidates": [] },
+    "soap": {
+      "subjective": [{ "item_id": "SUBJ-01", "category": "chief_complaint", "statement": "...", "missing_reason": null, "polarity": "PRESENT | NEGATED | UNCERTAIN", "evidence_ids": ["SEG-004"] }],
+      "objective": [{ "item_id": "OBJ-02", "category": "vital_signs", "statement": null, "missing_reason": "NOT_STATED_IN_TRANSCRIPT", "evidence_ids": [] }],
+      "assessment": [{ "item_id": "ASSESS-01", "statement": "...", "certainty": "UNCERTAIN_WORKING_IMPRESSION", "evidence_ids": ["SEG-028"] }],
+      "plan": {
+        "medications": [{
+          "item_id": "MED-01", "medication_name": "gabapentin", "dose": 300, "unit": "mg", "route": "oral", "frequency": "at bedtime",
+          "missing_reason": null, "event_date": "2026-01-31",
+          "medication_status": "discussed | planned | prescribed | reported | stopped | unclear",
+          "status_rationale": "...", "evidence_ids": ["SEG-033"]
+        }],
+        "lifestyle_and_activity": [],
+        "follow_up": []
+      }
+    },
+    "review_flags": [{ "flag_id": "FLG-01", "severity": "REQUIRED_ACTION", "code": "VERIFY_SPEAKER_ROLES", "message": "..." }]
+  },
+  "draft_sha256": "64-char-hex-digest",
+  "confirmation": "HitlConfirmation | null",
+  "regeneration_count": 0,
+  "argon_escalation_count": 0,
+  "last_error": "GuidedErrorEnvelope | null",
+  "trace_id": "string"
+}
+```
+
+### 2. Continuity Retrieval Workflow (`continuity_retrieval_agent` / `run_continuity_brief_workflow`)
+*   **Inputs:** `actor` (`ActorContext`), `patient_id`, `patient_tenant_id`, `consent_record` (`ConsentRecord`), `current_encounter` (`CurrentEncounterContext`), `as_of_date`, `session_id`, `max_encounters` (`10`, hard cap `25`), `requested_categories` (fail-closed subset of consent).
+*   **Output (`ContinuityBriefPayload`):**
+```json
+{
+  "schema_version": "1.0.0",
+  "patient_id": "PT-SYN-0001",
+  "continuity_source": "SPANNER_GRAPH_VERIFIED | FHIR_R4_AUTHORITATIVE",
+  "staleness_banner": "string | null",
+  "graph_watermark_ts": "ISO-8601 datetime | null",
+  "prior_history_items": [{
+    "item_id": "string",
+    "encounter_id": "ENC-2026-0131-NEURO (must != current_encounter.encounter_id)",
+    "encounter_date": "2026-01-31",
+    "specialty": "Neurology",
+    "practitioner_name": "Dr. Maya Lin",
+    "category": "medication | problem | clinical_note",
+    "summary": "string",
+    "medication_status": "discussed | planned | prescribed | reported | stopped | unclear | null",
+    "polarity": "PRESENT | NEGATED | UNCERTAIN | null",
+    "certainty": "string | null",
+    "evidence_ids": ["SEG-033"],
+    "fhir_ref": { "resource_type": "MedicationStatement", "resource_id": "string", "expected_version_id": "1" }
+  }],
+  "current_encounter": { "encounter_id": "ENC-2026-0331-ORTHO", "encounter_date": "2026-03-31", "specialty": "Orthopedics" },
+  "fhir_version_refs": [{ "resource_type": "Composition", "resource_id": "string", "expected_version_id": "1" }]
+}
+```
+
+### 3. Insurer Release Workflow (`records_release_coordinator` / `run_insurer_packet_workflow`)
+*   **Inputs:** `grant` (`ReleaseGrant`, `purpose == "prior_auth_documentation"` & unexpired), `consent_record` (`ConsentRecord` matching `consent_version_id`), `checklist_requirements`, `session_id`, `user_id` (`"records-reviewer"`), `packet_version` (`1`), `ttl_seconds` (`900`).
+*   **Output (`InsurerPacketWorkflowResult`):**
+```json
+{
+  "schema_version": "1.0.0",
+  "job_id": "string",
+  "session_id": "string",
+  "status": "AWAITING_HUMAN_RELEASE",
+  "packet": {
+    "schema_version": "1.0.0",
+    "packet_id": "PKT-0001",
+    "packet_version": 1,
+    "grant_id": "GRT-0001",
+    "patient_id": "PT-SYN-0001",
+    "consent_version_id": "CONSENT-v1",
+    "purpose": "prior_auth_documentation",
+    "status": "PREVIEW_AWAITING_HUMAN_RELEASE",
+    "allowlisted_items": ["...signed FHIR R4 resources only..."],
+    "coverage_checklist": { "numerator": 4, "denominator": 5, "missing_items": ["MRI lumbar spine report"] },
+    "packet_sha256": "64-char-hex-digest"
+  },
+  "confirmation": "HitlConfirmation",
+  "trace_id": "string"
+}
+```
+
+### 4. Shared HITL Confirmation & Guided Error Contracts
+*   **`HitlConfirmation` (`src/carethread/hitl/confirmations.py`):** `schema_version`, `confirmation_id`, `artifact_id`, `artifact_version`, `sha256_digest`, `kind`, `status` (`PENDING | APPROVED | REJECTED | EXPIRED | INVALIDATED_SUPERSEDED`), `created_at`, `expires_at`, `decided_by`, `decided_at`, `rejection_reason`, `superseded_by_version`, `superseded_by_digest`, `superseded_at`.
+*   **`GuidedErrorEnvelope` (`src/carethread/errors.py`):** `schema_version` (`"1.0.0"`), `status` (`"ERROR"`), `error_code`, `category` (`AUTHZ_DENIED | CONSENT_REVOKED | STALE_GRAPH_DETECTED | VALIDATION_RECOVERABLE | HITL_DIGEST_MISMATCH | SDP_UNAVAILABLE_FAIL_CLOSED | GRANT_EXPIRED | OUT_OF_SCOPE_PURPOSE`), `retryable`, `max_retries_remaining`, `field_path`, `guided_recovery`, `trace_id`.
+
+---
+
+## ⚙️ Working Functionality (Implemented & Verified)
+
+All functionality below is implemented in `src/carethread/` and continuously verified end-to-end across **129 passing tests** (`tests/` + `evals/test_golden_suite.py`):
+
+| Capability | What Works Right Now | Verified By |
+| :--- | :--- | :--- |
+| **Jan 31 Neurology SOAP Drafting & Grounding** | Fetches diarized transcript segments from tenant-scoped private storage, wraps untrusted transcript text in anti-spoofing delimiters, runs schema-validated SOAP extraction + deterministic `evidence_id` verification with bounded retries (`max_regenerations=2`), and pauses at a digest-bound clinician HITL confirmation. | `GC-01`, `GC-02`, `tests/test_tools_and_coordinator.py` |
+| **Medication Ambiguity, Negation & Injection Defense** | Rejects prompt-injection attempts to upgrade `gabapentin` from `discussed` to `prescribed`; preserves `stopped` (`ibuprofen`) and `NEGATED` red flags; `DeterministicFhirWriter` never creates a `MedicationRequest` for non-prescribed statuses. | `GC-02`, `tests/test_stores_fhir_outbox.py` |
+| **Clinician HITL Sign-Off, Rejection & TOCTOU Protection** | Clinician approval requires exact `(artifact_version, sha256_digest)` match; rejecting a draft blocks FHIR writes (`REJECTED_BY_CLINICIAN`); editing a draft supersedes prior approvals (`INVALIDATED_SUPERSEDED`); expired or replayed tokens fail closed. | `GC-07`, `tests/test_session_and_hitl.py` |
+| **Idempotent FHIR R4 Commit & Lost-Response Reconciliation** | Conditional `If-None-Exist` transactions commit `Composition`, `Condition`, `Observation`, `MedicationStatement`/`MedicationRequest`, and `Provenance` atomically; simulated lost responses transition to `RECONCILING_FHIR` and recover with zero duplicate resources. | `GC-06`, `tests/test_stores_fhir_outbox.py` |
+| **Mar 31 Orthopedic Continuity & Authoritative Fallback** | Enforces deterministic tenant, care-relationship, consent, and `allowed_categories` checks (`ScopeCapabilityToken`), queries bounded Spanner Graph (`max_hops=2`, `max_encounters<=25`), verifies FHIR `meta.versionId`, falls back to `FHIR_R4_AUTHORITATIVE` on staleness/missing projection/timeout, and keeps prior visits structurally separate from the March encounter. | `GC-01`, `GC-03`, `GC-04`, `GC-05`, `tests/test_continuity_and_release.py` |
+| **Purpose-Bound Insurer Packet & Coverage Checklist** | Validates expiring `prior_auth_documentation` grants and active patient consent, rejects out-of-scope purposes (`underwriting_risk_score`, `claims_adjudication`, `health_score`), excludes raw audio/drafts/session state, computes deterministic `CoverageChecklist(numerator, denominator, missing_items)`, and gates release behind HITL confirmation. | `GC-10`, `tests/test_security.py`, `tests/test_continuity_and_release.py` |
+| **Zero-PHI Telemetry, Fail-Closed SDP & Restart Durability** | Strips forbidden keys, scrubs residual PHI via SDP (`content.deidentify`), drops free text and increments `sdp_unavailable_fail_closed` on SDP outage, propagates W3C `traceparent` spans, compacts filtered Firestore sessions (`6` turns / `16,000` tokens) without losing open HITL confirmations, and restores state cleanly across container restarts. | `GC-08`, `GC-09`, `tests/test_observability.py`, `tests/test_session_and_hitl.py` |
+
+---
+
 ## 💻 How to Run & Evaluate Locally
 
 ```bash
