@@ -1,0 +1,95 @@
+# CareThread Cloud Build CI Pipeline
+# Hard gates: Python lint/hygiene, secret scan, unit + IaC contract tests,
+# 10-case Golden Evaluation Suite (GC-01..GC-10), and Terraform validation.
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: python-lint-and-hygiene
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        python -m pip install --no-cache-dir -e ".[dev]"
+        python -m compileall -q src/ tests/ evals/
+        python -c '
+        import ast, pathlib, sys
+        violations = []
+        for p in sorted(pathlib.Path("src/carethread").rglob("*.py")):
+            tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
+                    violations.append(f"{p}:{node.lineno}")
+        if violations:
+            sys.stderr.write(f"Forbidden print() calls found: {violations}\n")
+            sys.exit(1)
+        '
+
+  - id: secret-scan
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        python -c '
+        import pathlib, re, sys
+        patterns = [
+            re.compile(r"AIza[0-9A-Za-z_\-]{10,}"),
+            re.compile(r"\bsk-[0-9A-Za-z]{16,}"),
+            re.compile(r"BEGIN\s+[A-Z ]*PRIVATE KEY"),
+        ]
+        skip_dirs = {".git", ".venv", ".pytest_cache", "__pycache__", ".terraform"}
+        findings = []
+        for path in sorted(pathlib.Path(".").rglob("*")):
+            if not path.is_file() or any(part in skip_dirs for part in path.parts):
+                continue
+            if path.name == "cloudbuild.yaml":
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for pat in patterns:
+                if pat.search(text):
+                    findings.append(f"{path} matched {pat.pattern}")
+        if findings:
+            sys.stderr.write(f"Secret scan failed: {findings}\n")
+            sys.exit(1)
+        '
+
+  - id: unit-and-iac-contract-tests
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        python -m pip install --no-cache-dir -e ".[dev]"
+        pytest tests/ -v
+
+  - id: golden-eval-hard-gates
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        python -m pip install --no-cache-dir -e ".[dev]"
+        pytest evals/test_golden_suite.py -v
+
+  - id: full-pytest-suite
+    name: "python:3.12-slim"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        python -m pip install --no-cache-dir -e ".[dev]"
+        pytest tests/ evals/ -v
+
+  - id: terraform-fmt-and-validate
+    name: "hashicorp/terraform:1.9"
+    entrypoint: "sh"
+    args:
+      - "-ceu"
+      - |
+        cd infra/terraform
+        terraform fmt -check -recursive
+        terraform init -backend=false -input=false
+        terraform validate
