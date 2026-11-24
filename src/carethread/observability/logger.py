@@ -110,6 +110,9 @@ class StructuredAuditLogger:
             "job_id": job_id,
         }
 
+        any_fail_closed = False
+        any_free_text = False
+
         for key, raw_value in fields.items():
             if key in FORBIDDEN_LOG_KEYS or key not in ALLOWED_LOG_FIELDS:
                 continue
@@ -117,21 +120,26 @@ class StructuredAuditLogger:
             if key in FREE_TEXT_LOG_FIELDS:
                 if raw_value is None:
                     continue
+                any_free_text = True
                 scrubbed, failed_closed = self._redactor.scrub_free_text(str(raw_value))
                 if failed_closed or scrubbed is None:
-                    record["redaction_fail_closed"] = True
-                    record.setdefault(
-                        "error_category",
-                        ErrorCategory.SDP_UNAVAILABLE_FAIL_CLOSED.value,
-                    )
+                    any_fail_closed = True
                 else:
                     record[key] = scrubbed
-                    record.setdefault("redaction_fail_closed", False)
                 continue
 
             normalized = _normalize_scalar(raw_value)
             if normalized is not None:
                 record[key] = normalized
+
+        if any_fail_closed:
+            record["redaction_fail_closed"] = True
+            record.setdefault(
+                "error_category",
+                ErrorCategory.SDP_UNAVAILABLE_FAIL_CLOSED.value,
+            )
+        elif any_free_text:
+            record.setdefault("redaction_fail_closed", False)
 
         if self._sink is not None:
             self._sink.append(record)
@@ -151,13 +159,13 @@ class StructuredAuditLogger:
         severity: str = "INFO",
         **fields: Any,
     ) -> dict[str, Any]:
-        """Emit an INTENT audit event and return the record containing action_id."""
+        """Emit an ACTION_INTENT audit event and return the record containing action_id."""
         resolved_action_id = action_id or uuid.uuid4().hex
         filtered_fields = dict(fields)
         filtered_fields.pop("event_type", None)
         return self.log_event(
             severity=severity,
-            event_type="INTENT",
+            event_type="ACTION_INTENT",
             trace_id=trace_id,
             span_id=span_id,
             tenant_id=tenant_id,
@@ -179,12 +187,12 @@ class StructuredAuditLogger:
         severity: str = "INFO",
         **fields: Any,
     ) -> dict[str, Any]:
-        """Emit an OUTCOME audit event paired to an INTENT via action_id."""
+        """Emit an ACTION_OUTCOME audit event paired to an ACTION_INTENT via action_id."""
         filtered_fields = dict(fields)
         filtered_fields.pop("event_type", None)
         return self.log_event(
             severity=severity,
-            event_type="OUTCOME",
+            event_type="ACTION_OUTCOME",
             trace_id=trace_id,
             span_id=span_id,
             tenant_id=tenant_id,

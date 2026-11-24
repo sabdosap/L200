@@ -147,6 +147,7 @@ def test_fail_closed_sdp_outage_drops_phi_and_increments_counter():
         workflow="continuity_brief",
         job_id="job-789",
         error_summary=SYNTHETIC_PHI_TEXT,
+        redaction_fail_closed=False,
     )
 
     assert redactor.sdp_unavailable_fail_closed_count == 2
@@ -191,8 +192,8 @@ def test_log_intent_and_log_outcome_emit_paired_records():
     )
 
     assert len(sink) == 2
-    assert sink[0]["event_type"] == "INTENT"
-    assert sink[1]["event_type"] == "OUTCOME"
+    assert sink[0]["event_type"] == "ACTION_INTENT"
+    assert sink[1]["event_type"] == "ACTION_OUTCOME"
     assert sink[0]["action_id"] == sink[1]["action_id"] == action_id
     assert sink[0]["trace_id"] == sink[1]["trace_id"] == trace_id
     assert sink[1]["outcome"] == "SUCCESS"
