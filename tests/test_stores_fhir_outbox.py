@@ -529,3 +529,116 @@ class TestPrivateArtifactStore:
                 content_type="audio/wav",
                 cmek_key_name="",
             )
+
+    @pytest.mark.parametrize("bad_tenant", ["", "   ", "tenant/a", "../tenant-b", "a/.."])
+    def test_rejects_malformed_or_traversal_tenant_id(self, bad_tenant: str) -> None:
+        gcs = InMemoryArtifactStore()
+        with pytest.raises(GuidedErrorException) as exc_info:
+            build_tenant_artifact_path(bad_tenant, "audio", "clip.wav")
+        assert exc_info.value.envelope.category == ErrorCategory.AUTHZ_DENIED
+
+        with pytest.raises(GuidedErrorException) as exc_info:
+            gcs.put_artifact(
+                tenant_id=bad_tenant,
+                object_path=f"tenants/{bad_tenant}/audio/clip.wav",
+                data=b"audio",
+                content_type="audio/wav",
+            )
+        assert exc_info.value.envelope.category == ErrorCategory.AUTHZ_DENIED
+
+        with pytest.raises(GuidedErrorException) as exc_info:
+            gcs.list_artifacts(bad_tenant)
+        assert exc_info.value.envelope.category == ErrorCategory.AUTHZ_DENIED
+
+
+class TestReviewHardeningFixes:
+    @pytest.mark.parametrize(
+        "disallowed_state",
+        [
+            JobState.QUEUED,
+            JobState.DRAFTING,
+            JobState.REJECTED_BY_CLINICIAN,
+            JobState.FAILED_RETRYABLE,
+            JobState.FAILED_TERMINAL,
+        ],
+    )
+    def test_commit_signed_soap_job_blocks_non_committing_states_without_fhir_write(
+        self, disallowed_state: JobState
+    ) -> None:
+        fhir_store = InMemoryFhirR4Store()
+        writer = DeterministicFhirWriter(fhir_store)
+        outbox_store = JobOutboxStore()
+        reconciler = FhirCommitReconciler(outbox_store, fhir_store, writer)
+        soap = _make_jan31_soap()
+        now = datetime(2026, 1, 31, 16, 0, tzinfo=timezone.utc)
+
+        job, _ = outbox_store.create_or_get_job(
+            tenant_id="tenant-a",
+            encounter_id="enc-blocked",
+            idempotency_key=f"idem-blocked-{disallowed_state.value}",
+            initial_state=disallowed_state,
+            now=now,
+        )
+
+        with pytest.raises(GuidedErrorException) as exc_info:
+            reconciler.commit_signed_soap_job(
+                job_id=job.job_id,
+                worker_id="worker-1",
+                signed_soap=soap,
+                signer_id="practitioner-42",
+                transcript_ref=soap.source_refs.transcript_version_id,
+                now=now,
+            )
+        assert exc_info.value.envelope.error_code == "INVALID_JOB_STATE_FOR_FHIR_COMMIT"
+        assert fhir_store.list_resources("tenant-a") == []
+        assert outbox_store.get_job(job.job_id).state == disallowed_state
+
+    def test_fhir_transaction_rolls_back_all_entries_on_validation_error(self) -> None:
+        store = InMemoryFhirR4Store()
+        invalid_bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {
+                    "fullUrl": "urn:uuid:obs-1",
+                    "resource": {
+                        "resourceType": "Observation",
+                        "status": "final",
+                        "code": {"text": "bp"},
+                        "valueString": "120/80",
+                    },
+                    "request": {"method": "POST", "url": "Observation"},
+                },
+                {
+                    # Missing resourceType triggers validation failure
+                    "fullUrl": "urn:uuid:bad-2",
+                    "resource": {"status": "final"},
+                    "request": {"method": "POST", "url": "Composition"},
+                },
+            ],
+        }
+        with pytest.raises(GuidedErrorException):
+            store.transaction("tenant-a", invalid_bundle)
+
+        assert store.list_resources("tenant-a") == []
+
+        missing_resource_bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {
+                    "fullUrl": "urn:uuid:obs-1",
+                    "resource": {"resourceType": "Observation", "status": "final"},
+                    "request": {"method": "POST", "url": "Observation"},
+                },
+                {
+                    "fullUrl": "urn:uuid:missing-resource",
+                    "request": {"method": "POST", "url": "Composition"},
+                },
+            ],
+        }
+        with pytest.raises(GuidedErrorException) as exc_info:
+            store.transaction("tenant-a", missing_resource_bundle)
+        assert exc_info.value.envelope.error_code == "FHIR_INVALID_TRANSACTION_ENTRY"
+        assert store.list_resources("tenant-a") == []
+

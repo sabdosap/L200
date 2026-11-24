@@ -464,31 +464,53 @@ class InMemoryFhirR4Store:
                 return [_rewrite_refs(item) for item in obj]
             return obj
 
-        for entry in bundle.get("entry") or []:
-            resource = _rewrite_refs(entry["resource"])
-            request = entry.get("request") or {}
-            if_none_exist = request.get("ifNoneExist")
-            stored, created = self._create_internal(
-                tenant_id=tenant_id,
-                resource=resource,
-                if_none_exist=if_none_exist,
-            )
-            full_url = entry.get("fullUrl")
-            if isinstance(full_url, str) and full_url:
-                full_url_to_versioned[full_url] = _versioned_ref(stored)
-                full_url_to_relative[full_url] = f"{stored['resourceType']}/{stored['id']}"
+        had_tenant = tenant_id in self._records
+        tenant_snapshot = copy.deepcopy(self._records[tenant_id]) if had_tenant else None
 
-            response_entries.append(
-                {
-                    "resource": stored,
-                    "response": {
-                        "status": "201 Created" if created else "200 OK",
-                        "location": _versioned_ref(stored),
-                        "etag": f'W/"{stored["meta"]["versionId"]}"',
-                        "created": created,
-                    },
-                }
-            )
+        try:
+            for entry in bundle.get("entry") or []:
+                if not isinstance(entry, dict) or not isinstance(entry.get("resource"), dict):
+                    raise GuidedErrorException(
+                        GuidedErrorEnvelope(
+                            error_code="FHIR_INVALID_TRANSACTION_ENTRY",
+                            category=ErrorCategory.VALIDATION_RECOVERABLE,
+                            retryable=False,
+                            max_retries_remaining=0,
+                            field_path="entry.resource",
+                            guided_recovery="Each FHIR transaction bundle entry must contain a resource object.",
+                            trace_id=uuid.uuid4().hex,
+                        )
+                    )
+                resource = _rewrite_refs(entry["resource"])
+                request = entry.get("request") or {}
+                if_none_exist = request.get("ifNoneExist")
+                stored, created = self._create_internal(
+                    tenant_id=tenant_id,
+                    resource=resource,
+                    if_none_exist=if_none_exist,
+                )
+                full_url = entry.get("fullUrl")
+                if isinstance(full_url, str) and full_url:
+                    full_url_to_versioned[full_url] = _versioned_ref(stored)
+                    full_url_to_relative[full_url] = f"{stored['resourceType']}/{stored['id']}"
+
+                response_entries.append(
+                    {
+                        "resource": stored,
+                        "response": {
+                            "status": "201 Created" if created else "200 OK",
+                            "location": _versioned_ref(stored),
+                            "etag": f'W/"{stored["meta"]["versionId"]}"',
+                            "created": created,
+                        },
+                    }
+                )
+        except Exception:
+            if had_tenant and tenant_snapshot is not None:
+                self._records[tenant_id] = tenant_snapshot
+            else:
+                self._records.pop(tenant_id, None)
+            raise
 
         if self.simulate_lost_response_once:
             self.simulate_lost_response_once = False

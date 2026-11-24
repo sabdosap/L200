@@ -423,6 +423,22 @@ class FhirCommitReconciler:
                 increment_attempt=True,
             )
 
+        if job.state != JobState.COMMITTING_FHIR:
+            raise GuidedErrorException(
+                GuidedErrorEnvelope(
+                    error_code="INVALID_JOB_STATE_FOR_FHIR_COMMIT",
+                    category=ErrorCategory.VALIDATION_RECOVERABLE,
+                    retryable=False,
+                    max_retries_remaining=0,
+                    field_path="state",
+                    guided_recovery=(
+                        f"Cannot commit to FHIR while job is in state {job.state.value}; "
+                        "job must be in AWAITING_CLINICIAN_REVIEW or COMMITTING_FHIR."
+                    ),
+                    trace_id=uuid.uuid4().hex,
+                )
+            )
+
         try:
             result = self._writer.commit_signed_soap(
                 tenant_id=job.tenant_id,

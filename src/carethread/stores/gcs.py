@@ -32,12 +32,36 @@ class StoredArtifact(StrictModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+def _validate_tenant_id(tenant_id: str) -> str:
+    """Validate tenant_id contains no path separators, traversal segments, or empty whitespace."""
+    if (
+        not tenant_id
+        or tenant_id != tenant_id.strip()
+        or not tenant_id.strip()
+        or "/" in tenant_id
+        or "\\" in tenant_id
+        or ".." in tenant_id
+    ):
+        raise GuidedErrorException(
+            GuidedErrorEnvelope(
+                error_code="INVALID_TENANT_ID",
+                category=ErrorCategory.AUTHZ_DENIED,
+                retryable=False,
+                max_retries_remaining=0,
+                field_path="tenant_id",
+                guided_recovery="Provide a valid non-empty tenant_id without '/' or '..' segments.",
+                trace_id=uuid.uuid4().hex,
+            )
+        )
+    return tenant_id
+
+
 def build_tenant_artifact_path(tenant_id: str, category: str, filename: str) -> str:
     """Build a canonical tenant-scoped object path."""
-    clean_tenant = tenant_id.strip()
+    clean_tenant = _validate_tenant_id(tenant_id)
     clean_category = category.strip().strip("/")
     clean_filename = filename.strip().lstrip("/")
-    if not clean_tenant or not clean_category or not clean_filename:
+    if not clean_category or not clean_filename:
         raise GuidedErrorException(
             GuidedErrorEnvelope(
                 error_code="INVALID_ARTIFACT_PATH",
@@ -103,11 +127,11 @@ class InMemoryArtifactStore:
         self._versions: dict[str, list[tuple[bytes, StoredArtifact]]] = {}
 
     def _validate_tenant_path(self, tenant_id: str, object_path: str) -> str:
+        validated_tenant = _validate_tenant_id(tenant_id)
         normalized = object_path.strip()
-        expected_prefix = f"tenants/{tenant_id}/"
+        expected_prefix = f"tenants/{validated_tenant}/"
         if (
-            not tenant_id.strip()
-            or not normalized
+            not normalized
             or normalized.startswith("/")
             or ".." in normalized.split("/")
             or not normalized.startswith(expected_prefix)
@@ -121,7 +145,7 @@ class InMemoryArtifactStore:
                     field_path="object_path",
                     guided_recovery=(
                         "Artifact paths must remain strictly within "
-                        f"tenants/{tenant_id}/."
+                        f"tenants/{validated_tenant}/."
                     ),
                     trace_id=uuid.uuid4().hex,
                 )
@@ -228,7 +252,8 @@ class InMemoryArtifactStore:
 
     def list_artifacts(self, tenant_id: str, prefix: str = "") -> list[StoredArtifact]:
         """List latest artifact metadata under the caller's tenant namespace."""
-        base_prefix = f"tenants/{tenant_id}/"
+        validated_tenant = _validate_tenant_id(tenant_id)
+        base_prefix = f"tenants/{validated_tenant}/"
         full_prefix = base_prefix + prefix.lstrip("/") if prefix else base_prefix
         results: list[StoredArtifact] = []
         for path in sorted(self._versions):
