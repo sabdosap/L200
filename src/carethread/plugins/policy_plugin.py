@@ -49,6 +49,15 @@ DEFAULT_CALLER_ALLOWLIST: dict[str, frozenset[str]] = {
 }
 
 
+DEFAULT_TOOLS_REQUIRING_SCOPE_TOKEN: frozenset[str] = frozenset(
+    {
+        "query_patient_continuity_graph",
+        "verify_fhir_resource_versions",
+        "fetch_authoritative_fhir_history",
+    }
+)
+
+
 class PolicyDecision(StrictModel):
     """Result returned when a tool or model policy check passes."""
 
@@ -75,7 +84,7 @@ def _verify_token_integrity(
     now_utc: datetime,
 ) -> bool:
     if token_verifier is None:
-        return ensure_utc(token.expires_at) > now_utc
+        return False
     if hasattr(token_verifier, "verify_token"):
         return bool(token_verifier.verify_token(token, now_utc))
     if callable(token_verifier):
@@ -93,7 +102,7 @@ class CareThreadPolicyPlugin(_AdkBasePlugin):
         token_verifier: Any = None,
         *,
         max_prompt_tokens: int = FLASH_MAX_INPUT_TOKENS,
-        tools_requiring_scope_token: Iterable[str] = (),
+        tools_requiring_scope_token: Iterable[str] | None = None,
         name: str = "carethread_policy_plugin",
     ) -> None:
         super().__init__(name=name)
@@ -108,7 +117,11 @@ class CareThreadPolicyPlugin(_AdkBasePlugin):
         }
         self._token_verifier = token_verifier
         self._max_prompt_tokens = max_prompt_tokens
-        self._tools_requiring_scope_token = frozenset(tools_requiring_scope_token)
+        self._tools_requiring_scope_token = (
+            DEFAULT_TOOLS_REQUIRING_SCOPE_TOKEN
+            if tools_requiring_scope_token is None
+            else frozenset(tools_requiring_scope_token)
+        )
 
     def _deny_and_raise(
         self,
@@ -465,5 +478,6 @@ class CareThreadPolicyPlugin(_AdkBasePlugin):
 __all__ = [
     "CareThreadPolicyPlugin",
     "DEFAULT_CALLER_ALLOWLIST",
+    "DEFAULT_TOOLS_REQUIRING_SCOPE_TOKEN",
     "PolicyDecision",
 ]
