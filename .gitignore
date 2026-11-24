@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
+
+# Superpowers SDD scratch workspace
+.superpowers/
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
