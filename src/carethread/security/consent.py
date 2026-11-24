@@ -132,15 +132,14 @@ class GrantService:
             raise ValueError("Grant ttl must be positive")
 
         requested = frozenset(allowed_categories) if allowed_categories is not None else None
-        if requested is not None and consent_record.allowed_categories:
-            if not requested.issubset(consent_record.allowed_categories):
-                raise_security_error(
-                    category=ErrorCategory.OUT_OF_SCOPE_PURPOSE,
-                    error_code="INSURER_CATEGORY_OUT_OF_SCOPE",
-                    field_path="allowed_categories",
-                    guided_recovery="Request only categories permitted by the active patient consent record.",
-                    trace_id=trace_id,
-                )
+        if requested is not None and not requested.issubset(consent_record.allowed_categories):
+            raise_security_error(
+                category=ErrorCategory.OUT_OF_SCOPE_PURPOSE,
+                error_code="INSURER_CATEGORY_OUT_OF_SCOPE",
+                field_path="allowed_categories",
+                guided_recovery="Request only categories permitted by the active patient consent record.",
+                trace_id=trace_id,
+            )
         resolved_categories = (
             requested if requested is not None else consent_record.allowed_categories
         )

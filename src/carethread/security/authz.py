@@ -166,16 +166,24 @@ class AuthzService:
                 trace_id=trace_id,
             )
 
+        if "clinical_care" not in consent_record.allowed_purposes:
+            raise_security_error(
+                category=ErrorCategory.CONSENT_REVOKED,
+                error_code="CONSENT_CLINICAL_CARE_NOT_AUTHORIZED",
+                field_path="consent_record.allowed_purposes",
+                guided_recovery="Obtain active patient consent explicitly permitting 'clinical_care'.",
+                trace_id=trace_id,
+            )
+
         requested = frozenset(requested_categories) if requested_categories is not None else None
-        if requested is not None and consent_record.allowed_categories:
-            if not requested.issubset(consent_record.allowed_categories):
-                raise_security_error(
-                    category=ErrorCategory.AUTHZ_DENIED,
-                    error_code="REQUESTED_CATEGORIES_EXCEED_CONSENT",
-                    field_path="requested_categories",
-                    guided_recovery="Limit requested categories to those covered by active patient consent.",
-                    trace_id=trace_id,
-                )
+        if requested is not None and not requested.issubset(consent_record.allowed_categories):
+            raise_security_error(
+                category=ErrorCategory.AUTHZ_DENIED,
+                error_code="REQUESTED_CATEGORIES_EXCEED_CONSENT",
+                field_path="requested_categories",
+                guided_recovery="Limit requested categories to those covered by active patient consent.",
+                trace_id=trace_id,
+            )
         allowed_categories = (
             requested if requested is not None else consent_record.allowed_categories
         )

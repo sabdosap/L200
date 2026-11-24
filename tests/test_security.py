@@ -15,6 +15,7 @@ from carethread.security import (
     ConsentRecord,
     ConsentStatus,
     GrantService,
+    GrantStatus,
     InMemorySecretManagerClient,
     ReleaseGrant,
     ScopeCapabilityToken,
@@ -302,3 +303,129 @@ def test_secret_manager_resolves_versioned_secret_and_has_no_fallback():
             consent_record=_active_consent(),
             now=_now(),
         )
+
+
+def test_empty_and_narrower_allowed_categories_fail_closed():
+    authz = _make_authz_service()
+    grant_service = GrantService()
+    now = _now()
+    actor = ActorContext(
+        actor_id="CLIN-A-02",
+        tenant_id="tenant-a",
+        role="CLINICIAN",
+        specialty="orthopedics",
+        care_patient_ids=frozenset({"PT-SYN-0001"}),
+    )
+
+    empty_consent = ConsentRecord(
+        consent_version_id="CV-EMPTY",
+        tenant_id="tenant-a",
+        patient_id="PT-SYN-0001",
+        status=ConsentStatus.ACTIVE,
+        allowed_categories=frozenset(),
+    )
+    with pytest.raises(GuidedErrorException) as authz_empty_exc:
+        authz.authorize_clinical_access(
+            actor=actor,
+            patient_id="PT-SYN-0001",
+            patient_tenant_id="tenant-a",
+            consent_record=empty_consent,
+            now=now,
+            requested_categories=frozenset({"clinical_summary"}),
+        )
+    assert authz_empty_exc.value.envelope.category == ErrorCategory.AUTHZ_DENIED
+
+    with pytest.raises(GuidedErrorException) as grant_empty_exc:
+        grant_service.create_grant(
+            tenant_id="tenant-a",
+            patient_id="PT-SYN-0001",
+            insurer_id="INS-SYN-01",
+            purpose="prior_auth_documentation",
+            consent_record=empty_consent,
+            now=now,
+            allowed_categories=frozenset({"Composition"}),
+        )
+    assert grant_empty_exc.value.envelope.category == ErrorCategory.OUT_OF_SCOPE_PURPOSE
+
+    narrow_consent = ConsentRecord(
+        consent_version_id="CV-NARROW",
+        tenant_id="tenant-a",
+        patient_id="PT-SYN-0001",
+        status=ConsentStatus.ACTIVE,
+        allowed_categories=frozenset({"clinical_summary"}),
+    )
+    with pytest.raises(GuidedErrorException) as authz_narrow_exc:
+        authz.authorize_clinical_access(
+            actor=actor,
+            patient_id="PT-SYN-0001",
+            patient_tenant_id="tenant-a",
+            consent_record=narrow_consent,
+            now=now,
+            requested_categories=frozenset({"clinical_summary", "medications"}),
+        )
+    assert authz_narrow_exc.value.envelope.category == ErrorCategory.AUTHZ_DENIED
+
+    with pytest.raises(GuidedErrorException) as grant_narrow_exc:
+        grant_service.create_grant(
+            tenant_id="tenant-a",
+            patient_id="PT-SYN-0001",
+            insurer_id="INS-SYN-01",
+            purpose="prior_auth_documentation",
+            consent_record=narrow_consent,
+            now=now,
+            allowed_categories=frozenset({"clinical_summary", "medications"}),
+        )
+    assert grant_narrow_exc.value.envelope.category == ErrorCategory.OUT_OF_SCOPE_PURPOSE
+
+
+def test_authorize_clinical_access_requires_clinical_care_purpose():
+    authz = _make_authz_service()
+    actor = ActorContext(
+        actor_id="CLIN-A-02",
+        tenant_id="tenant-a",
+        role="CLINICIAN",
+        specialty="orthopedics",
+        care_patient_ids=frozenset({"PT-SYN-0001"}),
+    )
+    insurer_only_consent = ConsentRecord(
+        consent_version_id="CV-INS-ONLY",
+        tenant_id="tenant-a",
+        patient_id="PT-SYN-0001",
+        status=ConsentStatus.ACTIVE,
+        allowed_categories=frozenset({"clinical_summary"}),
+        allowed_purposes=frozenset({"prior_auth_documentation"}),
+    )
+
+    with pytest.raises(GuidedErrorException) as exc_info:
+        authz.authorize_clinical_access(
+            actor=actor,
+            patient_id="PT-SYN-0001",
+            patient_tenant_id="tenant-a",
+            consent_record=insurer_only_consent,
+            now=_now(),
+        )
+    assert exc_info.value.envelope.category == ErrorCategory.CONSENT_REVOKED
+
+
+def test_verify_grant_active_rejects_revoked_and_expired_grant_statuses():
+    grant_service = GrantService()
+    now = _now()
+    consent = _active_consent()
+    grant = grant_service.create_grant(
+        tenant_id="tenant-a",
+        patient_id="PT-SYN-0001",
+        insurer_id="INS-SYN-01",
+        purpose="prior_auth_documentation",
+        consent_record=consent,
+        now=now,
+    )
+
+    revoked_grant = grant.model_copy(update={"status": GrantStatus.REVOKED})
+    with pytest.raises(GuidedErrorException) as revoked_exc:
+        grant_service.verify_grant_active(revoked_grant, consent, now + timedelta(minutes=5))
+    assert revoked_exc.value.envelope.category == ErrorCategory.CONSENT_REVOKED
+
+    expired_grant = grant.model_copy(update={"status": GrantStatus.EXPIRED})
+    with pytest.raises(GuidedErrorException) as expired_exc:
+        grant_service.verify_grant_active(expired_grant, consent, now + timedelta(minutes=5))
+    assert expired_exc.value.envelope.category == ErrorCategory.GRANT_EXPIRED
