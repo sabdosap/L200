@@ -398,6 +398,56 @@ class ContinuityService:
             fhir_version_refs=allowed_refs,
         )
 
+    def fetch_authoritative_history(
+        self,
+        scope_token: ScopeCapabilityToken,
+        as_of_date: date,
+        max_encounters: int = 10,
+        *,
+        current_encounter_id: str | None = None,
+        fallback_reason: str = "AUTHORITATIVE_FHIR_DIRECT_READ",
+        staleness_banner: str = "Served directly from authoritative FHIR R4.",
+        now: datetime | None = None,
+    ) -> VerifiedContinuityResult:
+        """Verify ScopeCapabilityToken and read patient continuity directly from authoritative FHIR R4."""
+        check_now = now or datetime.now(timezone.utc)
+        if not self._authz_service.verify_token(scope_token, check_now):
+            raise GuidedErrorException(
+                GuidedErrorEnvelope(
+                    error_code="INVALID_OR_EXPIRED_SCOPE_TOKEN",
+                    category=ErrorCategory.AUTHZ_DENIED,
+                    retryable=False,
+                    max_retries_remaining=0,
+                    field_path="scope_token",
+                    guided_recovery="Re-authorize clinical access to obtain a valid ScopeCapabilityToken.",
+                    trace_id=uuid.uuid4().hex,
+                )
+            )
+
+        if max_encounters < 1 or max_encounters > MAX_ENCOUNTERS_LIMIT:
+            raise GuidedErrorException(
+                GuidedErrorEnvelope(
+                    error_code="CONTINUITY_MAX_ENCOUNTERS_OUT_OF_BOUNDS",
+                    category=ErrorCategory.VALIDATION_RECOVERABLE,
+                    retryable=False,
+                    max_retries_remaining=0,
+                    field_path="max_encounters",
+                    guided_recovery=f"Request between 1 and {MAX_ENCOUNTERS_LIMIT} encounters.",
+                    trace_id=uuid.uuid4().hex,
+                )
+            )
+
+        return self._fallback_to_authoritative_fhir(
+            tenant_id=scope_token.tenant_id,
+            patient_id=scope_token.patient_id,
+            as_of_date=as_of_date,
+            max_encounters=max_encounters,
+            current_encounter_id=current_encounter_id,
+            allowed_categories=scope_token.allowed_categories,
+            fallback_reason=fallback_reason,
+            staleness_banner=staleness_banner,
+        )
+
     def _verify_all_fhir_versions(
         self,
         tenant_id: str,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 import json
 import re
 from typing import Any, Literal
@@ -11,7 +11,7 @@ import uuid
 
 from pydantic import Field, ValidationError
 
-from carethread.errors import ErrorCategory, GuidedErrorEnvelope, GuidedErrorException
+from carethread.errors import ErrorCategory, GuidedErrorEnvelope
 from carethread.hitl.confirmations import HitlConfirmation, HitlConfirmationStore
 from carethread.schemas import StrictModel
 from carethread.schemas.v1.continuity import FhirVersionRef
@@ -66,19 +66,14 @@ _NON_PRESCRIPTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdiscussed\s+only\b", re.IGNORECASE),
 )
 
-_DISCUSSION_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bdiscussed\b", re.IGNORECASE),
-    re.compile(r"\bconsider(?:ing|ed)?\b", re.IGNORECASE),
-    re.compile(r"\bfuture\s+option\b", re.IGNORECASE),
-    re.compile(r"\bas\s+an\s+option\b", re.IGNORECASE),
-    re.compile(r"\bmight\s+try\b", re.IGNORECASE),
-)
-
 _AFFIRMATIVE_PRESCRIPTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:i\s+am|i'm|we\s+are|we'll|will)\s+(?:prescribing|starting|ordering)\b", re.IGNORECASE),
-    re.compile(r"\bprescribe[ds]?\b", re.IGNORECASE),
+    re.compile(r"\bprescrib(?:e|ed|es|ing)\b", re.IGNORECASE),
+    re.compile(r"\bordering\b", re.IGNORECASE),
+    re.compile(r"\bstarted\b.{0,40}\bprescription\b", re.IGNORECASE),
     re.compile(r"\bstarting\s+you\s+on\b", re.IGNORECASE),
     re.compile(r"\bsending\s+(?:a\s+)?(?:prescription|rx)\b", re.IGNORECASE),
+    re.compile(r"\brx\b", re.IGNORECASE),
 )
 
 
@@ -117,7 +112,7 @@ def _check_medication_status_discipline(
     med: MedicationItem,
     segment_map: dict[str, TranscriptSegment],
 ) -> str | None:
-    """Return a violation reason if a PRESCRIBED medication lacks valid prescription evidence."""
+    """Fail-closed check: PRESCRIBED requires medication name + affirmative prescription phrase without injection/negation."""
     if med.medication_status != MedicationStatus.PRESCRIBED:
         return None
 
@@ -126,6 +121,12 @@ def _check_medication_status_discipline(
         for eid in med.evidence_ids
         if eid in segment_map
     ]
+    if not cited_texts:
+        return (
+            f"Medication '{med.medication_name}' is marked 'prescribed' without "
+            "verifiable verbatim transcript segment evidence."
+        )
+
     combined_evidence = " ".join(cited_texts)
     rationale = med.status_rationale
 
@@ -143,12 +144,18 @@ def _check_medication_status_discipline(
                 "explicit non-prescription or discussion-only evidence."
             )
 
-    has_discussion = any(p.search(combined_evidence) for p in _DISCUSSION_ONLY_PATTERNS)
-    has_affirmative = any(p.search(combined_evidence) for p in _AFFIRMATIVE_PRESCRIPTION_PATTERNS)
-    if has_discussion and not has_affirmative:
+    med_name_pattern = re.compile(rf"\b{re.escape(med.medication_name.strip())}\b", re.IGNORECASE)
+    if not med_name_pattern.search(combined_evidence):
         return (
-            f"Medication '{med.medication_name}' was only discussed in cited transcript "
-            "segments and must not be marked 'prescribed'."
+            f"Medication '{med.medication_name}' is marked 'prescribed' but its name "
+            "does not appear in the cited verbatim transcript segment(s)."
+        )
+
+    has_affirmative = any(p.search(combined_evidence) for p in _AFFIRMATIVE_PRESCRIPTION_PATTERNS)
+    if not has_affirmative:
+        return (
+            f"Medication '{med.medication_name}' is marked 'prescribed' without an "
+            "affirmative clinician prescription statement in the cited verbatim transcript segment(s)."
         )
 
     return None
@@ -466,28 +473,14 @@ def build_clinical_tool_registry(
         Side Effects:
             None (read-only authoritative FHIR R4 retrieval).
         """
-        check_now = now or datetime.now(timezone.utc)
-        if not continuity_service._authz_service.verify_token(scope_token, check_now):
-            raise GuidedErrorException(
-                GuidedErrorEnvelope(
-                    error_code="INVALID_OR_EXPIRED_SCOPE_TOKEN",
-                    category=ErrorCategory.AUTHZ_DENIED,
-                    retryable=False,
-                    max_retries_remaining=0,
-                    field_path="scope_token",
-                    guided_recovery="Re-authorize clinical access to obtain a valid ScopeCapabilityToken.",
-                    trace_id=uuid.uuid4().hex,
-                )
-            )
-        return continuity_service._fallback_to_authoritative_fhir(
-            tenant_id=scope_token.tenant_id,
-            patient_id=scope_token.patient_id,
+        return continuity_service.fetch_authoritative_history(
+            scope_token=scope_token,
             as_of_date=as_of_date,
             max_encounters=max_encounters,
             current_encounter_id=current_encounter_id,
-            allowed_categories=scope_token.allowed_categories,
             fallback_reason=fallback_reason,
             staleness_banner=staleness_banner,
+            now=now,
         )
 
     def assemble_allowlisted_insurer_packet(

@@ -827,3 +827,57 @@ def test_tool_invocation_blocks_non_allowlisted_caller_via_policy_plugin() -> No
     assert exc_info.value.envelope.category == ErrorCategory.AUTHZ_DENIED
     assert exc_info.value.envelope.error_code == "CALLER_NOT_ALLOWLISTED"
 
+
+def test_prescribed_medication_fails_closed_without_name_and_affirmative_phrase() -> None:
+    # Neutral segment mentioning gabapentin with no affirmative prescription language
+    neutral_segments = [
+        TranscriptSegment(
+            evidence_id="SEG-001",
+            speaker_label="SPEAKER_00",
+            start_ms=0,
+            end_ms=3000,
+            text="Patient reports intermittent tingling in right hand.",
+        ),
+        TranscriptSegment(
+            evidence_id="SEG-002",
+            speaker_label="SPEAKER_00",
+            start_ms=3100,
+            end_ms=6000,
+            text="Patient read about gabapentin online last week.",
+        ),
+        TranscriptSegment(
+            evidence_id="SEG-003",
+            speaker_label="SPEAKER_01",
+            start_ms=6100,
+            end_ms=9000,
+            text="I am prescribing sumatriptan 50 mg oral PRN.",
+        ),
+    ]
+
+    # Case 1: Medication name present, but no affirmative clinician prescription phrase
+    draft_no_affirmative = _make_soap_draft(
+        gabapentin_status=MedicationStatus.PRESCRIBED,
+        gabapentin_evidence_id="SEG-002",
+    )
+    res_no_affirmative = validate_soap_draft_grounding(
+        soap_draft=draft_no_affirmative,
+        transcript_segments=neutral_segments,
+        trace_id="trace-failclosed-1",
+    )
+    assert isinstance(res_no_affirmative, GuidedErrorEnvelope)
+    assert res_no_affirmative.error_code == "MEDICATION_STATUS_UPGRADE_VIOLATION"
+
+    # Case 2: Affirmative prescription phrase present in SEG-003, but for a different drug (not gabapentin)
+    draft_wrong_segment = _make_soap_draft(
+        gabapentin_status=MedicationStatus.PRESCRIBED,
+        gabapentin_evidence_id="SEG-003",
+    )
+    res_wrong_segment = validate_soap_draft_grounding(
+        soap_draft=draft_wrong_segment,
+        transcript_segments=neutral_segments,
+        trace_id="trace-failclosed-2",
+    )
+    assert isinstance(res_wrong_segment, GuidedErrorEnvelope)
+    assert res_wrong_segment.error_code == "MEDICATION_STATUS_UPGRADE_VIOLATION"
+
+
